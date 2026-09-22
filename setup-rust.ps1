@@ -7,7 +7,7 @@
     幂等脚本 —— 已装好的部分会跳过，只补缺失的，可安全重复运行。
 
     做这些事：
-      1. 决定安装位置（默认 %USERPROFILE%\Rust，无需管理员权限）
+      1. 决定安装位置（**优先复用已有安装**，不会重复安装）
       2. 配置镜像（auto 会实测延迟选最快）
       3. 设置 RUSTUP_HOME / CARGO_HOME / PATH
       4. 安装或修复 rustup 与 stable 工具链（含 clippy / rustfmt）
@@ -16,9 +16,14 @@
       7. 端到端验证：新建临时项目、拉真实依赖、编译、跑 clippy
 
 .PARAMETER InstallRoot
-    工具链安装根目录。
-    默认：%USERPROFILE%\Rust（用户目录，通用且无需管理员权限）
-    想放到数据盘：-InstallRoot "D:\software\Rust"
+    工具链安装根目录。**通常不需要指定** —— 脚本会自动检测并复用已有安装
+    （依次查：CARGO_HOME 环境变量 -> PATH 上的 rustup -> 常见位置）。
+    仅在全新环境、且想自定义位置时使用，例如 -InstallRoot "D:\software\Rust"。
+
+.PARAMETER Force
+    允许在「已有安装」的情况下安装到另一个位置。
+    默认不加：检测到位置冲突会中止，避免装出第二份 Rust 并劫持环境变量。
+    注意：加了 -Force 也不会删除原安装，需要你自行清理。
 
 .PARAMETER Mirror
     auto（默认，实测延迟）/ tuna / rsproxy / ustc / none（官方源）
@@ -40,7 +45,8 @@ param(
     [ValidateSet('auto', 'tuna', 'rsproxy', 'ustc', 'none')]
     [string] $Mirror = 'auto',
     [switch] $SkipVerify,
-    [switch] $SkipPsReadLine
+    [switch] $SkipPsReadLine,
+    [switch] $Force
 )
 
 $ErrorActionPreference = 'Stop'
@@ -92,19 +98,98 @@ function Invoke-Native {
 
 # ─────────────────────────────────────────────────────────────
 # 1. 安装位置
+#
+#    ⚠️ 优先级：已有安装 > 默认值
+#    绝不能因为"默认值变了"就去装第二份 Rust 并劫持环境变量。
 # ─────────────────────────────────────────────────────────────
 Step '确定安装位置'
 
-if (-not $InstallRoot) {
-    # 默认放用户目录：通用、无需管理员权限、不依赖某个盘符是否存在
-    $InstallRoot = Join-Path $env:USERPROFILE 'Rust'
-    Info "默认安装位置：$InstallRoot"
-    if (Test-Path 'D:\') {
-        Info "检测到 D: 盘。如需把工具链放到数据盘，用：-InstallRoot 'D:\software\Rust'"
+# 检测已有安装。注意：
+#   · 当前环境值里 CARGO_HOME 指向的是「cargo 目录本身」，不是根目录
+#   · 经典 Unix 布局是 ~/.rustup + ~/.cargo，并不符合 <root>\rustup 模式
+#   所以这里直接追踪 RustupHome / CargoHome 两个具体路径，而不是一个"根"。
+$RustupHome  = $null
+$CargoHome   = $null
+$existingSrc = ''
+$defaultRoot = Join-Path $env:USERPROFILE 'Rust'
+
+# ── (a) 用户环境变量（最权威，支持任意布局）──
+$eRustup = [Environment]::GetEnvironmentVariable('RUSTUP_HOME', 'User')
+$eCargo  = [Environment]::GetEnvironmentVariable('CARGO_HOME', 'User')
+if ($eCargo -and (Test-Path (Join-Path $eCargo 'bin\rustup.exe'))) {
+    $CargoHome  = $eCargo
+    $RustupHome = if ($eRustup) { $eRustup } else { Join-Path (Split-Path $eCargo -Parent) 'rustup' }
+    $existingSrc = "用户环境变量 RUSTUP_HOME / CARGO_HOME"
+}
+
+# ── (b) PATH 上的 rustup 反推 ──
+if (-not $CargoHome) {
+    $cmd = Get-Command rustup.exe -ErrorAction SilentlyContinue
+    if ($cmd) {
+        $maybeCargo  = Split-Path (Split-Path $cmd.Source -Parent) -Parent   # ...\cargo
+        $maybeRustup = Join-Path (Split-Path $maybeCargo -Parent) 'rustup'   # ...\rustup
+        if ((Test-Path $maybeRustup) -and (Test-Path (Join-Path $maybeCargo 'bin\rustup.exe'))) {
+            $CargoHome   = $maybeCargo
+            $RustupHome  = $maybeRustup
+            $existingSrc = "PATH 上的 rustup（$($cmd.Source)）"
+        }
     }
 }
-$RustupHome = Join-Path $InstallRoot 'rustup'
-$CargoHome  = Join-Path $InstallRoot 'cargo'
+
+# ── (c) 常见位置 ──
+if (-not $CargoHome) {
+    $candidates = @(
+        (Join-Path $env:USERPROFILE 'Rust'),
+        'D:\software\Rust', 'C:\software\Rust', 'E:\software\Rust'
+    )
+    foreach ($cand in $candidates) {
+        if ((Test-Path (Join-Path $cand 'cargo\bin\rustup.exe')) -and (Test-Path (Join-Path $cand 'rustup'))) {
+            $CargoHome   = Join-Path $cand 'cargo'
+            $RustupHome  = Join-Path $cand 'rustup'
+            $existingSrc = "常见位置 $cand"
+            break
+        }
+    }
+}
+
+# ── 决定最终使用哪两个路径 ──
+if ($PSBoundParameters.ContainsKey('InstallRoot')) {
+    $targetCargo  = Join-Path $InstallRoot 'cargo'
+    $targetRustup = Join-Path $InstallRoot 'rustup'
+
+    if ($CargoHome -and ($CargoHome -ne $targetCargo)) {
+        Warn "检测到已有 Rust 安装（$existingSrc）："
+        Warn "    CARGO_HOME  = $CargoHome"
+        Warn "    RUSTUP_HOME = $RustupHome"
+        Warn "但你用 -InstallRoot 指定了别的位置：$InstallRoot"
+        if (-not $Force) {
+            Warn ''
+            Warn '继续的话会在新位置装第二份 Rust，并把环境变量指过去（原安装会变成孤儿）。'
+            Warn '为避免误伤，脚本已中止。你的选择：'
+            Warn '  · 沿用现有安装  -> 去掉 -InstallRoot 参数'
+            Warn '  · 确实要换位置  -> 加 -Force（原安装需你自行清理）'
+            exit 1
+        }
+        Warn '-Force 已指定，按你的要求继续。'
+    }
+
+    $CargoHome  = $targetCargo
+    $RustupHome = $targetRustup
+}
+elseif ($CargoHome) {
+    # 有现成安装 -> 直接复用。这是幂等脚本必须有的行为
+    Ok "复用已有安装（$existingSrc）"
+}
+else {
+    # 全新环境
+    $CargoHome  = Join-Path $defaultRoot 'cargo'
+    $RustupHome = Join-Path $defaultRoot 'rustup'
+    Info "未检测到已有安装 -> 安装到默认位置：$defaultRoot"
+    if (Test-Path 'D:\') {
+        Info "如需放到数据盘：-InstallRoot 'D:\software\Rust'"
+    }
+}
+
 Info "RUSTUP_HOME = $RustupHome"
 Info "CARGO_HOME  = $CargoHome"
 

@@ -106,15 +106,18 @@ mklink CLAUDE.md AGENTS.md     # Windows（需开发者模式或管理员）
 ### Windows
 
 ```powershell
-# 默认：自动选最快镜像，装到 %USERPROFILE%\Rust
+# 默认：自动检测并复用已有安装；确实没有才装到 %USERPROFILE%\Rust
 powershell -ExecutionPolicy Bypass -File .\setup-rust.ps1
-
-# 自定义位置和镜像
-.\setup-rust.ps1 -InstallRoot "E:\Dev\Rust" -Mirror rsproxy
 
 # 快速检查模式
 .\setup-rust.ps1 -SkipVerify -SkipPsReadLine
+
+# 全新环境，且要自定义位置和镜像
+.\setup-rust.ps1 -InstallRoot "E:\Dev\Rust" -Mirror rsproxy
 ```
+
+> ⚠️ **若已有安装、而 `-InstallRoot` 指向别处，脚本会中止**（退出码 1），而不是装第二份。
+> 确实要换位置请加 `-Force` —— 但**原安装不会被删除**，需要你自行清理。
 
 ### macOS / Linux
 
@@ -131,7 +134,7 @@ chmod +x setup-rust.sh
 
 | # | 步骤 |
 |---|---|
-| 1 | 确定安装位置（Windows 默认 `%USERPROFILE%\Rust`；Unix 默认沿用 `~/.rustup` + `~/.cargo`，即不改动）|
+| 1 | **自动检测已有安装并复用**（`CARGO_HOME` 环境变量 → PATH 上的 rustup → 常见位置）；确实没有才新建 |
 | 2 | **实测各镜像延迟**，自动选最快（`tuna` / `rsproxy` / `ustc`）|
 | 3 | 设置 `RUSTUP_HOME` / `CARGO_HOME` / `RUSTUP_DIST_SERVER`，修正 PATH |
 | 4 | 安装或修复 rustup（含损坏工具链的强制重装）|
@@ -141,6 +144,18 @@ chmod +x setup-rust.sh
 | 8 | **端到端验证**：新建临时项目 → 拉真实依赖 → `build` / `clippy` / `fmt` / `test` |
 
 **幂等**：已装好的部分会跳过，可以反复运行。
+
+### 三条安全设计（都是踩过坑才加的）
+
+| 机制 | 防的是什么 |
+|---|---|
+| **优先复用已有安装** | 防止因为"默认路径变了"就装出第二份 Rust 并劫持环境变量 —— 原安装会变成孤儿 |
+| **位置冲突默认中止** | `-InstallRoot` 与现有安装不一致时不静默执行，退出码 1 并给出两个选项 |
+| **改 PATH 前自动备份** | 原 User PATH 存到 `%TEMP%\user-path-backup-<时间戳>.txt`，出问题可整段还原 |
+
+> 第 1 条不是假想问题。本套件早期版本把默认路径从 `D:\software\Rust` 改为
+> `%USERPROFILE%\Rust` 后，一次运行就在 C 盘装了 **1.48 GB** 的第二份 Rust，
+> 并把 `RUSTUP_HOME` / `CARGO_HOME` 改指过去。现在会先检测、复用，不再重复安装。
 
 ### 两个平台的坑（脚本里都处理了）
 
