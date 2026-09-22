@@ -1,0 +1,23 @@
+# ── 操作系统 ──
+Thumbs.db
+desktop.ini
+.DS_Store
+*~
+
+# ── 编辑器 ──
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+.idea/
+*.swp
+
+# ── 脚本运行产物 ──
+# setup-rust.ps1 改 PATH 前会把原值备份到 %TEMP%，若手动拷到这里请勿提交
+user-path-backup-*.txt
+*.bak
+*.tmp
+*.log
+
+# ── 若拿本仓库当工作区试跑 Rust 项目 ──
+target/
+**/target/
