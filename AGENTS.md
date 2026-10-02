@@ -4,11 +4,18 @@
 > Claude Code、OpenAI Codex、Cursor、Zed、Gemini CLI、RooCode、goose、opencode 等。
 >
 > **用法**：放到**项目根目录**。子目录可放自己的 `AGENTS.md` 覆盖父级（**就近优先**）。
-> 冲突时：最近的 `AGENTS.md` 生效 > 上层 `AGENTS.md` > 用户在对话里的临时指令。
+> 冲突时：**用户在对话里的明确指令 > 最近的 `AGENTS.md` > 上层 `AGENTS.md`**——
+> 本文件是默认值；用户在现场说的，永远算数。
 
 ---
 
-## 0. 最高优先级：先验证，后断言
+## 0. 最高优先级：先读项目，先验证，后断言
+
+**先读项目，再读本文件。** 本文件是语言通用的默认值，项目自己已有的约定优先于它：
+项目级 `AGENTS.md`、README、以及邻近代码的风骨（命名、注释密度、错误处理、测试风格）
+都是"项目约定"，**它们 > 本文件**。项目选择"错误就是 `Option` + 一行 `eprintln!`、
+从不用 anyhow"是它的权利，不要按本文件的默认值去"纠正"项目。改任何代码之前，
+先照它旁边代码的样子写。
 
 **开工前必须先确认工具链可用**（换机器、新环境、CI 里同样适用）：
 
@@ -32,7 +39,17 @@ rustup default stable
   - `cargo clippy --all-targets -- -D warnings` —— 写完整功能后
   - `cargo test` —— 有测试时，必须跑
   - `cargo fmt` —— 收尾
+- **clippy 的失败摘要会被缓存**：同一个错误第二次运行时可能只剩
+  "could not compile … due to N previous errors"，看不到详情。要重跑，先
+  `touch` 报错的那个源文件，强制它重新分析。
 - 报告结果时**贴真实命令输出**。没跑就说"未验证"，不要写"应该没问题"。
+- **编译和测试全绿，不等于功能成立。** 二进制、游戏、CLI 要**按用户拿到它的形态**
+  验证：真的启动它、走一遍用户路径、截图或抓输出。仓库里已有端到端脚本
+  （如 `e2e_*.ps1`、`capture.ps1`）就用它，没有就写一个。
+- **新增的回归测试要过一遍变异验证**：把修复点临时改坏，确认测试确实变红，
+  再还原——抓不住 bug 的测试等于没写。
+- 验证会碰用户数据（配置、存档、缓存）时：**先备份，事毕还原**，并在汇报里
+  说明"已还原"——用户的存档不是测试夹具。
 
 ---
 
@@ -49,7 +66,9 @@ rustup default stable
 
 ### 迭代器优先
 
-- 禁止 `for i in 0..v.len() { v[i] }` 这类索引循环，改用迭代器。
+- 默认用迭代器，别写 `for i in 0..v.len() { v[i] }` 这类循环。但**正当的索引循环
+  不是禁忌**：同时走多个并行数组、或循环变量本身就是语义（槽位号、行号、通道号）
+  时，索引是对的——这条规则是别用索引去绕开 `iter()`，不是禁止索引。
 - 用 `iter()` / `iter_mut()` / `into_iter()` 的语义差异要讲清楚：
   `iter()` 借出 `&T`，`into_iter()` 消费并移出 `T`。
 - 链式组合 `.map().filter().collect()`，但**超过 5 步或含义复杂的链式要拆成命名函数**——
@@ -77,7 +96,7 @@ rustup default stable
 |---|---|
 | 库 crate 对外 API | `thiserror` —— 定义具体错误枚举，让调用方能 match |
 | 应用 / bin / 脚本 | `anyhow` —— `Result<(), anyhow::Error>` + `.context("...")` |
-| 一次性原型 | 允许 `unwrap`，但要注释 `// TODO: 生产环境需处理` |
+| 一次性原型 | 允许 `unwrap`，但提交前必须消掉，或留下 `// TODO: 生产环境需处理` |
 | 不可能失败 | 用 `expect("不变量说明：xxx")` 而非 `unwrap()` |
 
 **硬性规则**
@@ -103,6 +122,8 @@ rustup default stable
   看到 `Rc<RefCell<T>>` 出现在多线程代码里就是 bug。
 - 优先用 channel（`mpsc`、`crossbeam`）传递所有权，而非共享可变状态。
 - 死锁预防：多把锁时**固定加锁顺序**，并写进注释。
+- **没有 async 运行时就不要引入**：局部 `.await`（比如加载一个资源）不需要把
+  整个项目改成 tokio。先问清楚：这是真的 I/O 密集，还是只是"某处有个 await"？
 
 ---
 
@@ -120,6 +141,8 @@ rustup default stable
 
 ## 5. Cargo 工作流
 
+- **不经用户确认，不新增依赖**。`cargo add` 很顺手，但每个依赖都是用户的审计与
+  维护成本；伸手之前先说清楚：标准库为什么做不到。
 - 加依赖用 `cargo add <crate>`（会自动查最新版并写入），**不要手写版本号**。
 - 提到任何 crate 时，**先确认最新版本**：`cargo search <crate> --limit 1`
   或 `cargo add <crate> --dry-run`。
@@ -156,7 +179,10 @@ cargo metadata --format-version 1 | Select-String manifest_path
 
 每一行输出是一个 `Cargo.toml` 的绝对路径，形如
 `<某个前缀>/registry/src/<crate>-<version>/Cargo.toml`。
-那个**前缀**就是所有依赖的源码根。输出为空 → 依赖尚未下载，先跑 `cargo fetch`。
+那个**前缀**就是所有依赖的源码根。前缀随镜像源变形——官方源是 `index.crates.io-…`，
+国内镜像常见 `rsproxy.cn-…`、`mirrors.ustc.edu.cn-…`——**别按 `index.crates.io`
+去匹配目录名**，认准 `registry/src/` 之后那段 `crate-版本`。
+输出为空 → 依赖尚未下载，先跑 `cargo fetch`。
 
 > 备选：直接读环境变量。Bash 用 `echo "${CARGO_HOME:-$HOME/.cargo}"`；
 > PowerShell 用 `"$env:CARGO_HOME"`（为空时回退到 `"$env:USERPROFILE\.cargo"`）。
